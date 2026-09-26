@@ -1,0 +1,14 @@
+[Unit]
+Description=erion memory/ + DB 스냅숏 -> vault-for-erion (private)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Environment=HOME=/home/ubuntu
+WorkingDirectory=/home/ubuntu/projects/erion
+# 덤프·커밋·푸시는 scripts/vault-backup.sh. 바뀐 게 없으면 아무것도 안 한다.
+ExecStart=/home/ubuntu/projects/erion/scripts/vault-backup.sh
+MemoryMax=200M
+TimeoutStartSec=180

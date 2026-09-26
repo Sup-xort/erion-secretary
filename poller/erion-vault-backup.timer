@@ -1,0 +1,12 @@
+[Unit]
+Description=erion vault-backup 하루 한 번
+
+[Timer]
+# 04:00 KST (= 19:00 UTC). 사람이 안 쓰는 시각.
+OnCalendar=*-*-* 19:00:00 UTC
+RandomizedDelaySec=10m
+# 꺼져 있다 켜지면 밀린 한 번은 따라잡는다 — 백업은 늦게라도 하는 게 낫다.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
