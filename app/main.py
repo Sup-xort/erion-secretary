@@ -8,6 +8,7 @@ purge/raw/삭제는 여기 도구 레지스트리에 아예 등록하지 않는�
   블록을 없애는 방법은 item_done 뿐이다.
 2026-09-20: 완료 표시가 Canvas 과제·강의영상까지 넓어졌다 (tools.mark_done · done_mark 테이블).
   대시보드에도 완료 버튼이 생겼다 — 원본이 뭐라 하든 사람이 찍은 게 이긴다.
+2026-09-26: Canvas 공지 — notices (읽기). 폴러가 담고, 대시보드에서 펼친 것만 읽음으로 적는다.
 """
 
 import asyncio
@@ -47,7 +48,8 @@ server = MCPServer(
                  "이번 주 계획(어느 날 뭘 할지)은 week_plan 으로 본다 — 서버가 수업·캘린더·마감·소요시간으로 "
                  "짠 것이다. 사용자가 배치를 바꾸고 싶어하면('물리 숙제는 목요일에 할게', '금요일엔 못 해') "
                  "plan_pin(과제를 그 날에) / plan_day(그 날 가용시간)로 고치고 week_plan 으로 결과를 보여줘라. "
-                 "계획 자체를 네가 새로 짜서 말로만 답하지 마라 — 대시보드와 어긋난다.",
+                 "계획 자체를 네가 새로 짜서 말로만 답하지 마라 — 대시보드와 어긋난다.\n"
+                 "과목 공지는 notices 로 본다. 일정·마감이 바뀌었는지 물으면 마감(deadlines)만 보지 말고 공지도 봐라.",
     auth_server_provider=provider,
     auth=AuthSettings(
         issuer_url=config.ISSUER,
@@ -119,6 +121,17 @@ async def lectures(within_days: int = 14, course: str | None = None,
         return await asyncio.to_thread(learningx.brief, within_days, course, unwatched_only)
     except (learningx.LearningXError, canvas.CanvasError) as e:
         return [{"error": str(e)}]
+
+
+@server.tool(description="Canvas 과목 공지(최근순). 공지에만 있는 정보가 있다 — 휴강·대체 영상·시험장·마감 변경. "
+                         "days 안(기본 21일), course 는 과목명 일부, unread_only=true 면 안 읽은 것만. "
+                         "본문은 1500자에서 잘린다. 최대 15행. 30분마다 갱신된다.")
+def notices(days: int = 21, course: str | None = None, unread_only: bool = False) -> list[dict]:
+    conn = db.vault()
+    try:
+        return tools.notices(conn, days, course, unread_only)
+    finally:
+        conn.close()
 
 
 @server.tool(description="사용자의 Canvas 에서 모듈 항목(강의영상·페이지·과제·파일)을 제목으로 찾는다. "

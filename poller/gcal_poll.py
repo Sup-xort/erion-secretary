@@ -20,6 +20,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from srcstatus import mark as _status
+
 KST = timezone(timedelta(hours=9))
 DATA_DIR = Path(os.environ.get("ERION_DATA", "/home/ubuntu/projects/erion/data"))
 TOKEN_FILE = DATA_DIR / "gcal_token.json"
@@ -160,7 +162,12 @@ def main() -> int:
     ap.add_argument("--dry", action="store_true", help="DB 에 안 쓰고 보여주기만")
     args = ap.parse_args()
 
-    rows = collect(_access_token())
+    try:
+        rows = collect(_access_token())
+    except (Exception, SystemExit) as e:
+        if not args.dry:
+            _status("gcal", e)
+        raise
     rows.sort(key=lambda r: r["start_at"])
     allday = sum(1 for r in rows if r["_allday"])
     print(f"[gcal] {', '.join(CALENDARS)} → {len(rows)}건 (종일 {allday}건)")
@@ -177,6 +184,7 @@ def main() -> int:
         return 0
     ins, upd = write(rows)
     print(f"[gcal] 신규 {ins} · 갱신 {upd}")
+    _status("gcal", note=f"{len(rows)}건")
     return 0
 
 

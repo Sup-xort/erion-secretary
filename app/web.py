@@ -55,6 +55,8 @@ SECRET_FILE = config.DATA_DIR / "web_secret"
 SPAN_DAYS = 120
 PAST_DAYS = 14
 ROW_CAP = 400
+NOTICE_DAYS = 60        # 대시보드 공지 목록 — 학기 앞쪽 안내(수업 운영 방식)까지 닿게
+NOTICE_CAP = 60
 
 # 로그인 연속 실패 제한 — 공개 인터넷에 비밀번호 폼이 하나 더 생기는 거라서.
 FAIL_MAX, FAIL_WINDOW = 5, 600
@@ -772,7 +774,33 @@ body.fzon{overflow:hidden}
 .inl .ln.go{text-decoration:underline;text-decoration-color:var(--line2);text-underline-offset:3px}
 .inl .ln.go:active{color:var(--ink)}
 .nsent{padding:0 13px 10px 40px;font-size:11.5px;color:var(--warnFg)}
-@media (prefers-reduced-motion:reduce){.inn,.inb .cnt{animation:none}}
+/* 공지 (2026-09-26) — 알림함 카드를 그대로 쓰고, 누르면 본문이 펼쳐진다 */
+.inn.notice::before{background:var(--mark)}
+.inn.notice .inh .ico{color:var(--mark)}
+.inn.notice .inh{padding-bottom:2px}
+.nmeta{padding:0 13px 10px 40px;font-size:12px;color:var(--muted)}
+.nbody{padding:0 13px 13px 40px}
+.nbody[hidden]{display:none}
+.nbody .nt{white-space:pre-wrap;font-size:13.5px;line-height:1.75;color:var(--sub);overflow-wrap:anywhere;text-wrap:pretty}
+.nfiles{margin-top:8px;font-size:12.5px;color:var(--muted);display:flex;flex-direction:column;gap:2px}
+.nall{margin:6px 0 -4px}
+.nall .s-link{margin-top:6px;height:30px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+/* 연결 상태 */
+.mi.dot::after{content:"";width:6px;height:6px;border-radius:50%;background:var(--hot);margin-left:8px}
+.srow{display:flex;gap:11px;margin-top:10px;padding:12px 13px;border-radius:13px;background:var(--desk2);border:1px solid var(--line);
+  animation:rise .4s cubic-bezier(.2,.8,.2,1) both;animation-delay:calc(var(--i,0)*35ms)}
+.sdot{flex:none;width:8px;height:8px;margin-top:7px;border-radius:50%;background:var(--mark2)}
+.srow.err .sdot{background:var(--hot)}
+.srow.stale .sdot,.srow.never .sdot{background:var(--warnFg)}
+.srow.err{border-color:var(--warnBd)}
+.srow .sm{flex:1;min-width:0}
+.srow .st{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.srow .sn{font-size:14px;font-weight:600;color:var(--ink)}
+.srow .sw{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;flex:none}
+.srow.err .sw{color:var(--hot)}
+.srow .ss{margin-top:3px;font-size:12.5px;line-height:1.5;color:var(--sub);overflow-wrap:anywhere}
+.srow .s-link{margin-top:8px;height:30px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+@media (prefers-reduced-motion:reduce){.inn,.inb .cnt,.srow{animation:none}}
 </style>
 <script>try{var t=localStorage.getItem("erion-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head>"""
@@ -847,6 +875,18 @@ paint();
 '''
 
 
+def _mark_source(source: str, err: str | None = None, note: str | None = None) -> None:
+    """연결 상태 한 줄 (tools.sources). 적다가 실패해도 대시보드는 그대로 간다."""
+    try:
+        conn = db.vault()
+        try:
+            tools.source_mark(conn, source, err, note)
+        finally:
+            conn.close()
+    except Exception:                           # noqa: BLE001
+        pass
+
+
 def _lectures(marks: set[str]) -> tuple[list[dict], list[dict], str | None]:
     """강의영상을 블록 모양으로 맞춰 준다. 실패해도 대시보드는 살아야 한다.
 
@@ -857,7 +897,10 @@ def _lectures(marks: set[str]) -> tuple[list[dict], list[dict], str | None]:
     try:
         rows = learningx.brief(within_days=SPAN_DAYS, unwatched_only=False, limit=ROW_CAP)
     except Exception as e:                      # noqa: BLE001 — 어떤 실패든 대시보드보다 가볍다
-        return [], [], f"{type(e).__name__}: {e}"[:160]
+        err = f"{type(e).__name__}: {e}"[:160]
+        _mark_source("learningx", err)
+        return [], [], err
+    _mark_source("learningx", note=f"{len(rows)}편")
     out, seen = [], []
     for r in rows:
         if f"lx:{r['url']}" in marks:
@@ -899,6 +942,8 @@ async def page(request: Request) -> Response:
         live = [b for b in every if not b["done"]] + lec
         focus_st = _focus_state(conn)
         inbox = _inbox(conn)
+        notices = tools.notices(conn, days=NOTICE_DAYS, limit=NOTICE_CAP, body_max=None)
+        sources = tools.sources(conn)
         try:
             plan, plan_err = planner.compute(conn, live, now), None
         except Exception as e:                  # noqa: BLE001 — 계획이 틀려도 목록은 보여야 한다
@@ -929,14 +974,18 @@ async def page(request: Request) -> Response:
         "focus": focus_st,
         "weather": wx,
         "inbox": inbox,
+        "notices": notices,
+        "noticeUrl": f"{BASE}/notice",
+        "sources": sources,
+        "gcalUrl": f"{PREFIX}/gcal/start",
         "pushUrl": f"{BASE}/push",
         "swUrl": f"{PREFIX}/sw.js",
         "vapid": push.public_key(),
     }
     return HTMLResponse(_HEAD + f"""<body><div class=amb aria-hidden=true><i></i><i></i><i></i></div><div class=wrap>
 <div class=bar><div class=brand>erion<b></b></div>
-<div class=tools><button class="ib inb" id=inb aria-label="알림함"></button><button class="ib gear" id=gear aria-label="설정" aria-expanded=false>⚙</button>
-<div class=menu id=menu hidden><button class=mi id=bell hidden>🔕 알림 켜기</button><button class=mi id=theme>◐ 밝게 · 어둡게</button>
+<div class=tools><button class="ib inb" id=ntc aria-label="공지"></button><button class="ib inb" id=inb aria-label="알림함"></button><button class="ib gear" id=gear aria-label="설정" aria-expanded=false>⚙</button>
+<div class=menu id=menu hidden><button class=mi id=bell hidden>🔕 알림 켜기</button><button class=mi id=theme>◐ 밝게 · 어둡게</button><button class=mi id=conn>◎ 연결 상태</button>
 <a class=mi href="{BASE}/logout">나가기</a></div></div></div>
 <div class=greet><div class=stamp id=stamp></div><div class=headline id=headline></div>
 <div class=subline id=subline></div><div class=band id=band></div></div>
@@ -1010,6 +1059,27 @@ async def done(request: Request) -> Response:
     finally:
         conn.close()
     return JSONResponse(r, status_code=200 if r.get("ok") else 400)
+
+
+async def notice_read(request: Request) -> Response:
+    """공지를 펼쳤다 → 읽음. JSON {id} 또는 {all: true}. Canvas 엔 안 알린다(읽기 전용 토큰으로 쓴다)."""
+    if not _authed(request):
+        return JSONResponse({"ok": False, "error": "로그인이 풀렸어요"}, status_code=401)
+    if request.headers.get("x-erion") != "web":
+        return JSONResponse({"ok": False, "error": "잘못된 요청"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:                           # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "JSON 이 아니에요"}, status_code=400)
+    ids = None if body.get("all") else [str(body.get("id") or "")]
+    if ids == [""]:
+        return JSONResponse({"ok": False, "error": "id 가 없어요"}, status_code=400)
+    conn = db.vault()
+    try:
+        n = tools.notice_read(conn, ids)
+    finally:
+        conn.close()
+    return JSONResponse({"ok": True, "n": n})
 
 
 async def plan_move(request: Request) -> Response:
@@ -1289,7 +1359,7 @@ const DOW="일월화수목금토";
 const KIND={assignment:"과제",task:"할 일",video:"영상",lecture:"강의영상"};
 function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
 // 아이콘은 Bootstrap Icons 1.11.3(MIT)에서 쓰는 것만 옮겨 왔다. 글자 기호(▶ ❚❚ ✕ ⚙)는 기기마다 모양이 달랐다.
-const ICO={"plus-lg":"<path fill-rule=\"evenodd\" d=\"M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2\"/>","check-lg":"<path d=\"M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425z\"/>","x-lg":"<path d=\"M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8z\"/>","gear":"<path d=\"M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492M5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0\"/> <path d=\"M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.377l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115z\"/>","moon-stars":"<path d=\"M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278M4.858 1.311A7.27 7.27 0 0 0 1.025 7.71c0 4.02 3.279 7.276 7.319 7.276a7.32 7.32 0 0 0 5.205-2.162q-.506.063-1.029.063c-4.61 0-8.343-3.714-8.343-8.29 0-1.167.242-2.278.681-3.286\"/> <path d=\"M10.794 3.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387a1.73 1.73 0 0 0-1.097 1.097l-.387 1.162a.217.217 0 0 1-.412 0l-.387-1.162A1.73 1.73 0 0 0 9.31 6.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387a1.73 1.73 0 0 0 1.097-1.097zM13.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.16 1.16 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.16 1.16 0 0 0-.732-.732l-.774-.258a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732z\"/>","play-circle":"<path d=\"M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16\"/> <path d=\"M6.271 5.055a.5.5 0 0 1 .52.038l3.5 2.5a.5.5 0 0 1 0 .814l-3.5 2.5A.5.5 0 0 1 6 10.5v-5a.5.5 0 0 1 .271-.445\"/>","sun":"<path d=\"M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0m0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13m8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5M3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8m10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0m-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0m9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707M4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708\"/>","alarm":"<path d=\"M8.5 5.5a.5.5 0 0 0-1 0v3.362l-1.429 2.38a.5.5 0 1 0 .858.515l1.5-2.5A.5.5 0 0 0 8.5 9z\"/> <path d=\"M6.5 0a.5.5 0 0 0 0 1H7v1.07a7.001 7.001 0 0 0-3.273 12.474l-.602.602a.5.5 0 0 0 .707.708l.746-.746A6.97 6.97 0 0 0 8 16a6.97 6.97 0 0 0 3.422-.892l.746.746a.5.5 0 0 0 .707-.708l-.601-.602A7.001 7.001 0 0 0 9 2.07V1h.5a.5.5 0 0 0 0-1zm1.038 3.018a6 6 0 0 1 .924 0 6 6 0 1 1-.924 0M0 3.5c0 .753.333 1.429.86 1.887A8.04 8.04 0 0 1 4.387 1.86 2.5 2.5 0 0 0 0 3.5M13.5 1c-.753 0-1.429.333-1.887.86a8.04 8.04 0 0 1 3.527 3.527A2.5 2.5 0 0 0 13.5 1\"/>","bell-fill":"<path d=\"M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2m.995-14.901a1 1 0 1 0-1.99 0A5 5 0 0 0 3 6c0 1.098-.5 6-2 7h14c-1.5-1-2-5.902-2-7 0-2.42-1.72-4.44-4.005-4.901\"/>","pause-fill":"<path d=\"M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5m5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5\"/>","arrow-up-right":"<path fill-rule=\"evenodd\" d=\"M14 2.5a.5.5 0 0 0-.5-.5h-6a.5.5 0 0 0 0 1h4.793L2.146 13.146a.5.5 0 0 0 .708.708L13 3.707V8.5a.5.5 0 0 0 1 0z\"/>","bell":"<path d=\"M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2M8 1.918l-.797.161A4 4 0 0 0 4 6c0 .628-.134 2.197-.459 3.742-.16.767-.376 1.566-.663 2.258h10.244c-.287-.692-.502-1.49-.663-2.258C12.134 8.197 12 6.628 12 6a4 4 0 0 0-3.203-3.92zM14.22 12c.223.447.481.801.78 1H1c.299-.199.557-.553.78-1C2.68 10.2 3 6.88 3 6c0-2.42 1.72-4.44 4.005-4.901a1 1 0 1 1 1.99 0A5 5 0 0 1 13 6c0 .88.32 4.2 1.22 6\"/>","dash-lg":"<path fill-rule=\"evenodd\" d=\"M2 8a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11A.5.5 0 0 1 2 8\"/>","chevron-down":"<path fill-rule=\"evenodd\" d=\"M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708\"/>","calendar3":"<path d=\"M14 0H2a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M1 3.857C1 3.384 1.448 3 2 3h12c.552 0 1 .384 1 .857v10.286c0 .473-.448.857-1 .857H2c-.552 0-1-.384-1-.857z\"/> <path d=\"M6.5 7a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m-9 3a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m-9 3a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2\"/>","play-fill":"<path d=\"m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393\"/>"};
+const ICO={"megaphone":"<path d=\"M13 2.5a1.5 1.5 0 0 1 3 0v11a1.5 1.5 0 0 1-3 0v-.214c-2.162-1.241-4.49-1.843-6.912-2.083l.405 2.712A1 1 0 0 1 5.51 15.1h-.548a1 1 0 0 1-.916-.599l-1.85-3.49-.202-.003A2.014 2.014 0 0 1 0 9V7a2.02 2.02 0 0 1 1.992-2.013 75 75 0 0 0 2.483-.075c3.043-.154 6.148-.849 8.525-2.199zm1 0v11a.5.5 0 0 0 1 0v-11a.5.5 0 0 0-1 0m-1 1.35c-2.344 1.205-5.209 1.842-8 2.033v4.233q.27.015.537.036c2.568.189 5.093.744 7.463 1.993zm-9 6.215v-4.13a95 95 0 0 1-1.992.052A1.02 1.02 0 0 0 1 7v2c0 .55.448 1.002 1.006 1.009A61 61 0 0 1 4 10.065m-.657.975 1.609 3.037.01.024h.548l-.002-.014-.443-2.966a68 68 0 0 0-1.722-.082z\"/>","megaphone-fill":"<path d=\"M13 2.5a1.5 1.5 0 0 1 3 0v11a1.5 1.5 0 0 1-3 0zm-1 .724c-2.067.95-4.539 1.481-7 1.656v6.237a25 25 0 0 1 1.088.085c2.053.204 4.038.668 5.912 1.56zm-8 7.841V4.934c-.68.027-1.399.043-2.008.053A2.02 2.02 0 0 0 0 7v2c0 1.106.896 1.996 1.994 2.009l.496.008a64 64 0 0 1 1.51.048m1.39 1.081q.428.032.85.078l.253 1.69a1 1 0 0 1-.983 1.187h-.548a1 1 0 0 1-.916-.599l-1.314-2.48a66 66 0 0 1 1.692.064q.491.026.966.06\"/>","plus-lg":"<path fill-rule=\"evenodd\" d=\"M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2\"/>","check-lg":"<path d=\"M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425z\"/>","x-lg":"<path d=\"M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8z\"/>","gear":"<path d=\"M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492M5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0\"/> <path d=\"M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.377l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115z\"/>","moon-stars":"<path d=\"M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278M4.858 1.311A7.27 7.27 0 0 0 1.025 7.71c0 4.02 3.279 7.276 7.319 7.276a7.32 7.32 0 0 0 5.205-2.162q-.506.063-1.029.063c-4.61 0-8.343-3.714-8.343-8.29 0-1.167.242-2.278.681-3.286\"/> <path d=\"M10.794 3.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387a1.73 1.73 0 0 0-1.097 1.097l-.387 1.162a.217.217 0 0 1-.412 0l-.387-1.162A1.73 1.73 0 0 0 9.31 6.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387a1.73 1.73 0 0 0 1.097-1.097zM13.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.16 1.16 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.16 1.16 0 0 0-.732-.732l-.774-.258a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732z\"/>","play-circle":"<path d=\"M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16\"/> <path d=\"M6.271 5.055a.5.5 0 0 1 .52.038l3.5 2.5a.5.5 0 0 1 0 .814l-3.5 2.5A.5.5 0 0 1 6 10.5v-5a.5.5 0 0 1 .271-.445\"/>","sun":"<path d=\"M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6m0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0m0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13m8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5M3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8m10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0m-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0m9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707M4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708\"/>","alarm":"<path d=\"M8.5 5.5a.5.5 0 0 0-1 0v3.362l-1.429 2.38a.5.5 0 1 0 .858.515l1.5-2.5A.5.5 0 0 0 8.5 9z\"/> <path d=\"M6.5 0a.5.5 0 0 0 0 1H7v1.07a7.001 7.001 0 0 0-3.273 12.474l-.602.602a.5.5 0 0 0 .707.708l.746-.746A6.97 6.97 0 0 0 8 16a6.97 6.97 0 0 0 3.422-.892l.746.746a.5.5 0 0 0 .707-.708l-.601-.602A7.001 7.001 0 0 0 9 2.07V1h.5a.5.5 0 0 0 0-1zm1.038 3.018a6 6 0 0 1 .924 0 6 6 0 1 1-.924 0M0 3.5c0 .753.333 1.429.86 1.887A8.04 8.04 0 0 1 4.387 1.86 2.5 2.5 0 0 0 0 3.5M13.5 1c-.753 0-1.429.333-1.887.86a8.04 8.04 0 0 1 3.527 3.527A2.5 2.5 0 0 0 13.5 1\"/>","bell-fill":"<path d=\"M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2m.995-14.901a1 1 0 1 0-1.99 0A5 5 0 0 0 3 6c0 1.098-.5 6-2 7h14c-1.5-1-2-5.902-2-7 0-2.42-1.72-4.44-4.005-4.901\"/>","pause-fill":"<path d=\"M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5m5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5\"/>","arrow-up-right":"<path fill-rule=\"evenodd\" d=\"M14 2.5a.5.5 0 0 0-.5-.5h-6a.5.5 0 0 0 0 1h4.793L2.146 13.146a.5.5 0 0 0 .708.708L13 3.707V8.5a.5.5 0 0 0 1 0z\"/>","bell":"<path d=\"M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2M8 1.918l-.797.161A4 4 0 0 0 4 6c0 .628-.134 2.197-.459 3.742-.16.767-.376 1.566-.663 2.258h10.244c-.287-.692-.502-1.49-.663-2.258C12.134 8.197 12 6.628 12 6a4 4 0 0 0-3.203-3.92zM14.22 12c.223.447.481.801.78 1H1c.299-.199.557-.553.78-1C2.68 10.2 3 6.88 3 6c0-2.42 1.72-4.44 4.005-4.901a1 1 0 1 1 1.99 0A5 5 0 0 1 13 6c0 .88.32 4.2 1.22 6\"/>","dash-lg":"<path fill-rule=\"evenodd\" d=\"M2 8a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11A.5.5 0 0 1 2 8\"/>","chevron-down":"<path fill-rule=\"evenodd\" d=\"M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708\"/>","calendar3":"<path d=\"M14 0H2a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2M1 3.857C1 3.384 1.448 3 2 3h12c.552 0 1 .384 1 .857v10.286c0 .473-.448.857-1 .857H2c-.552 0-1-.384-1-.857z\"/> <path d=\"M6.5 7a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m-9 3a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m-9 3a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2m3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2\"/>","play-fill":"<path d=\"m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393\"/>"};
 function ic(n,cls){const i=el("span","ico"+(cls?" "+cls:""));i.setAttribute("aria-hidden","true");
   i.innerHTML='<svg viewBox="0 0 16 16" fill="currentColor">'+ICO[n]+'</svg>';return i}
 function withIc(b,n,txt){b.textContent="";b.append(ic(n));if(txt)b.append(el("span",null,txt));return b}
@@ -1983,7 +2053,8 @@ $("#theme").onclick=()=>{
 const bell=$("#bell");
 function b64u(s){s=s.replace(/-/g,"+").replace(/_/g,"/");const r=atob(s+"=".repeat((4-s.length%4)%4));
   return Uint8Array.from(r,c=>c.charCodeAt(0))}
-function setBell(on){bell.textContent=on?"🔔 알림 켜짐 · 시험 보내기":"🔕 알림 켜기";$("#gear").classList.toggle("dot",!on)}
+let bellOff=false;
+function setBell(on){bell.textContent=on?"🔔 알림 켜짐 · 시험 보내기":"🔕 알림 켜기";bellOff=!on;gearDot()}
 if("serviceWorker" in navigator&&"PushManager" in window&&"Notification" in window){
   bell.hidden=false;
   navigator.serviceWorker.register(DATA.swUrl).then(reg=>reg.pushManager.getSubscription())
@@ -2011,7 +2082,7 @@ if("serviceWorker" in navigator&&"PushManager" in window&&"Notification" in wind
 // 보낸 푸시를 모아 둔다(push_log). 알림을 밀어 지웠거나 기기가 구독이 끊겨 못 받은 것도 여기 있다.
 // 읽음 표시는 이 기기에만(localStorage) — 기기마다 따로 봐도 괜찮은 편의 기능이다.
 const INB=DATA.inbox||[],inb=$("#inb");
-const INK={morning:["sun","아침"],evening:["moon-stars","저녁"],lecopen:["play-circle","강의 열림"]};
+const INK={morning:["sun","아침"],evening:["moon-stars","저녁"],lecopen:["play-circle","강의 열림"],notice:["megaphone","공지"]};
 const inKind=k=>INK[k]||(/^due/.test(k)?["alarm","마감 전"]:["bell","알림"]);
 let seenAt=(function(){try{return localStorage.getItem("erion-inbox-seen")||""}catch(e){return""}})();
 function inbBadge(){
@@ -2024,6 +2095,7 @@ function lineBlock(t){const x=t.replace(/^·\s*/,"");let best=null;
   BLOCKS.concat(DID).forEach(b=>{if(b.label&&x.startsWith(b.label)&&(!best||b.label.length>best.label.length))best=b});return best}
 function go(url){
   try{const q=new URL(url,location.href).searchParams,t=q.get("tab"),o=q.get("open");
+    if(q.get("notice")){openNotices(q.get("notice"));return}
     if(t&&TABS.some(x=>x[0]===t)&&t!==tab){tab=t;try{localStorage.setItem("erion-tab",tab)}catch(e){}renderTabs();render(true)}
     const b=o&&BLOCKS.concat(DID).find(x=>x.id===o);if(b){openSheet(b);return}
     closeSheet();scrollTo({top:$("#tabs").offsetTop-4,behavior:calm()?"auto":"smooth"})}catch(e){closeSheet()}}
@@ -2033,7 +2105,7 @@ function openInbox(){
   const x=withIc(el("button","s-x"),"x-lg");x.type="button";x.setAttribute("aria-label","닫기");x.onclick=closeSheet;sheet.append(x);
   sheet.append(el("div","s-kind","알림함"));
   sheet.append(el("div","s-title",INB.length?"받은 알림":"받은 알림이 없어요"));
-  if(bell.hidden===false&&$("#gear").classList.contains("dot")){
+  if(bell.hidden===false&&bellOff){
     const w=el("div","ib-off");w.append(el("span",null,"이 기기는 알림이 꺼져 있어요"));
     const b=el("button","s-link","켜기");b.type="button";b.onclick=()=>bell.click();w.append(b);sheet.append(w)}
   let day="";
@@ -2056,6 +2128,87 @@ function openInbox(){
   sheet.classList.add("on");
   if(INB.length){seenAt=INB[0].at;try{localStorage.setItem("erion-inbox-seen",seenAt)}catch(e){}inbBadge()}}
 inb.onclick=openInbox;inbBadge();
+
+// ---------------------------------------------------------------- 공지 (2026-09-26)
+// Canvas 공지. 폴러가 30분마다 notice 에 담는다. 안 읽음 = Canvas 가 unread 이고 여기서도 안 펼친 것.
+// 펼치면 서버에 읽음으로 적는다(기기 사이에 같이 간다). Canvas 쪽 읽음 표시는 안 바꾼다.
+const NTC=DATA.notices||[],ntc=$("#ntc");
+function ntcBadge(){
+  const n=NTC.filter(x=>x.unread).length;
+  withIc(ntc,n?"megaphone-fill":"megaphone");ntc.classList.toggle("has",!!n);
+  if(n)ntc.append(el("b","cnt",n>9?"9+":String(n)))}
+function ntcRead(n,card){
+  if(!n.unread)return;n.unread=false;card.classList.remove("new");ntcBadge();
+  fetch(DATA.noticeUrl,{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-erion":"web"},
+    body:JSON.stringify({id:n.id})}).catch(()=>{})}
+function openNotices(focusId){
+  sheet.textContent="";sheet.append(el("div","grab"));
+  const x=withIc(el("button","s-x"),"x-lg");x.type="button";x.setAttribute("aria-label","닫기");x.onclick=closeSheet;sheet.append(x);
+  sheet.append(el("div","s-kind","공지"));
+  const un=NTC.filter(n=>n.unread).length;
+  sheet.append(el("div","s-title",!NTC.length?"공지가 없어요":un?"안 읽은 공지 "+un+"개":"과목 공지"));
+  if(un>1){const w=el("div","nall");const b=el("button","s-link","모두 읽음으로");b.type="button";
+    b.onclick=()=>{NTC.forEach(n=>n.unread=false);sheet.querySelectorAll(".inn.new").forEach(c=>c.classList.remove("new"));
+      ntcBadge();b.remove();
+      fetch(DATA.noticeUrl,{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-erion":"web"},
+        body:JSON.stringify({all:true})}).catch(()=>{})};
+    w.append(b);sheet.append(w)}
+  let day="",target=null;
+  NTC.forEach((n,i)=>{
+    const d=ddays(n.posted_at),dl=d===0?"오늘":d===-1?"어제":shortDate(n.posted_at);
+    if(dl!==day){day=dl;sheet.append(el("div","s-h",dl))}
+    const card=el("div","inn notice"+(n.unread?" new":""));card.style.setProperty("--i",Math.min(i,12));
+    const hd=el("button","inh");hd.type="button";hd.setAttribute("aria-expanded","false");
+    hd.append(ic("megaphone"),el("span","t",n.title),el("span","w",hm(n.posted_at)));
+    card.append(hd);
+    const meta=[n.course];if(n.files.length)meta.push("첨부 "+n.files.length);
+    card.append(el("div","nmeta",meta.join(" · ")));
+    const body=el("div","nbody");body.hidden=true;
+    body.append(el("div","nt",n.body||"(본문 없음)"));
+    if(n.files.length){const f=el("div","nfiles");n.files.forEach(t=>f.append(el("div",null,"📎 "+t)));body.append(f)}
+    if(n.url&&/^https?:\/\//.test(n.url)){const a=el("a","s-link","Canvas 에서 보기");a.append(ic("arrow-up-right"));
+      a.href=n.url;a.target="_blank";a.rel="noopener";body.append(a)}
+    card.append(body);
+    hd.onclick=()=>{const open=body.hidden;body.hidden=!open;hd.setAttribute("aria-expanded",String(open));
+      card.classList.toggle("open",open);if(open)ntcRead(n,card)};
+    if(n.id===focusId)target=[hd,card];
+    sheet.append(card)});
+  if(NTC.length)sheet.append(el("div","note","최근 60일 · 30분마다 Canvas 에서 받아요. 여기서 읽어도 Canvas 의 읽음 표시는 그대로예요."));
+  sheet.scrollTop=0;sheet.classList.remove("empty-pane");sheet.style.transform="";
+  if(!wide())scrim.classList.add("on");
+  sheet.classList.add("on");
+  if(target){target[0].click();setTimeout(()=>target[1].scrollIntoView({block:"start",behavior:calm()?"auto":"smooth"}),60)}}
+ntc.onclick=()=>openNotices();ntcBadge();
+
+// ---------------------------------------------------------------- 연결 상태 (2026-09-26)
+// 소스마다 마지막 성공. 토큰이 죽으면 옛 데이터가 조용히 남아 있을 뿐이라, 여기와 톱니 점으로 드러낸다.
+const CONN=DATA.sources||[];
+const srcBad=CONN.some(x=>x.source!=="push"&&x.state!=="ok");
+function gearDot(){$("#gear").classList.toggle("dot",bellOff||srcBad);$("#conn").classList.toggle("dot",srcBad)}
+function ago(iso){if(!iso)return"없음";const m=Math.round((Date.now()-new Date(iso).getTime())/6e4);
+  return m<1?"방금":m<60?m+"분 전":m<60*24?Math.round(m/60)+"시간 전":Math.round(m/1440)+"일 전"}
+const SST={ok:"정상",stale:"오래됨",err:"실패",never:"기록 없음"};
+function openConn(){
+  sheet.textContent="";sheet.append(el("div","grab"));
+  const x=withIc(el("button","s-x"),"x-lg");x.type="button";x.setAttribute("aria-label","닫기");x.onclick=closeSheet;sheet.append(x);
+  sheet.append(el("div","s-kind","설정"));
+  sheet.append(el("div","s-title",srcBad?"끊긴 연결이 있어요":"모두 연결돼 있어요"));
+  CONN.forEach((r,i)=>{
+    const row=el("div","srow "+r.state);row.style.setProperty("--i",i);
+    row.append(el("span","sdot"));
+    const m=el("div","sm");
+    const top=el("div","st");top.append(el("span","sn",r.name),el("span","sw",r.source==="push"?(r.last_ok?"마지막 전달 "+ago(r.last_ok):""):SST[r.state]+" · "+ago(r.last_ok)));
+    m.append(top);
+    const sub=r.err||r.note;if(sub)m.append(el("div","ss",sub));
+    if(r.state==="stale"&&!r.err)m.append(el("div","ss","마지막 성공이 오래됐어요 — 폴러가 안 돌고 있을 수 있어요"));
+    if(r.source==="gcal"&&r.state!=="ok"){const a=el("a","s-link","다시 연결");a.append(ic("arrow-up-right"));a.href=DATA.gcalUrl;m.append(a)}
+    if(r.source==="push"&&bell.hidden===false&&bellOff){const b=el("button","s-link","이 기기 알림 켜기");b.type="button";b.onclick=()=>bell.click();m.append(b)}
+    row.append(m);sheet.append(row)});
+  sheet.append(el("div","note","Canvas 는 30분, 캘린더는 20분마다 받아요. 강의영상은 대시보드를 열 때 바로 물어봐요."));
+  sheet.scrollTop=0;sheet.classList.remove("empty-pane");sheet.style.transform="";
+  if(!wide())scrim.classList.add("on");
+  sheet.classList.add("on")}
+$("#conn").onclick=openConn;gearDot();
 // 탭 줄이 화면 위에 붙었는지 — 붙었을 때만 유리판
 {const tb=$("#tabs");const f=()=>tb.classList.toggle("stuck",tb.getBoundingClientRect().top<=.5&&scrollY>0);
  addEventListener("scroll",f,{passive:true});f()}
@@ -2319,10 +2472,11 @@ document.addEventListener("visibilitychange",()=>{
   focusPull();wakeOn();tick()});
 
 // 알림을 누르고 들어오면 ?tab= / ?open=<id> 가 붙어 온다.
-{const q=new URLSearchParams(location.search),t=q.get("tab"),o=q.get("open");
+{const q=new URLSearchParams(location.search),t=q.get("tab"),o=q.get("open"),nt=q.get("notice");
  if(q.get("inbox"))setTimeout(openInbox,0);
+ if(nt)setTimeout(()=>openNotices(nt),0);
  if(t&&TABS.some(x=>x[0]===t))tab=t;
- if(t||o||q.get("inbox"))history.replaceState(null,"",location.pathname);
+ if(t||o||nt||q.get("inbox"))history.replaceState(null,"",location.pathname);
  if(o)setTimeout(()=>{const b=BLOCKS.find(x=>x.id===o);if(b)openSheet(b)},0)}
 head();renderTabs();render(true);paneIdle();bandBuild();
 syncFocus(false);
@@ -2363,6 +2517,7 @@ ROUTES = [
     ("/web/login", login, ["POST"]),
     ("/web/done", done, ["POST"]),
     ("/web/plan", plan_move, ["POST"]),
+    ("/web/notice", notice_read, ["POST"]),
     ("/web/est", est, ["POST"]),
     ("/web/focus", focus, ["GET", "POST"]),
     ("/web/push", push_sub, ["POST"]),

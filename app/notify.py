@@ -10,6 +10,8 @@
   3. 마감 전 — DUE_BEFORE 시간 전에 한 번씩. 같은 회차에 걸린 건 한 알림으로 묶는다.
      강의영상(LearningX 출석)은 DUE_BEFORE_LEC — 한 번 더 일찍. 놓치면 출석이 날아간다.
   4. 강의영상 열림 (2026-09-25) — 인정기간이 시작되면 한 번. "언제까지 봐야 출석인지" 를 같이.
+  5. Canvas 공지 (2026-09-26) — 새 공지가 올라오면 한 번. 폴러(30분)가 notice 에 담은 것 중
+     올라온 지 NOTICE_FRESH 시간 안이고 Canvas 에서도 대시보드에서도 안 읽은 것. 여러 개면 한 알림.
 
 내가 챗으로 추가한 블록의 목표일(item.target_at)은 마감이 아니다 — 여기 어디에도 안 낀다.
 
@@ -41,6 +43,8 @@ BLOCKED_CAP = 1.0                 # 가용시간이 이보다 적은 날 = "못 
 LEC_CACHE = config.DATA_DIR / "notify_lectures.json"
 LEC_CACHE_SEC = 3600              # LearningX 는 한 시간에 한 번만 (토큰 발급이 매번 요청 1번이다)
 KEEP_LOG_DAYS = 45
+NOTICE_FRESH = 48                 # 올라온 지 이 시간 안의 공지만 알린다 (배포 첫날 옛 공지를 쏟지 않게)
+NOTICE_PREVIEW = 110              # 공지 하나일 때 본문 앞부분 몇 자를 알림에 싣는지
 
 
 def _lectures(marks: set[str]) -> list[dict]:
@@ -126,8 +130,11 @@ def _due(iso: str, now: datetime) -> str:
     return f"{day} {t}"
 
 
-def _url(open_id: str | None = None, tab: str | None = None) -> str:
+def _url(open_id: str | None = None, tab: str | None = None, notice: str | None = None) -> str:
     q = []
+    if notice:
+        from urllib.parse import quote
+        q.append(f"notice={quote(notice, safe='')}")
     if tab:
         q.append(f"tab={tab}")
     if open_id:
@@ -235,6 +242,27 @@ def lec_opened(live, now, seen=lambda k: False) -> tuple[str, str, str, list[str
             _url(tab="today"), keys)
 
 
+def notices_new(conn, now, seen=lambda k: False) -> tuple[str, str, str, list[str]] | None:
+    """막 올라온 Canvas 공지 → (title, body, url, keys)."""
+    lo = (now - timedelta(hours=NOTICE_FRESH)).isoformat(timespec="seconds")
+    hit = [r for r in conn.execute(
+        "SELECT id,course,title,body,posted_at FROM notice WHERE posted_at >= ? "
+        "AND canvas_read = 0 AND read_at IS NULL ORDER BY posted_at", [lo])
+        if not seen(f"notice:{r['id']}")]
+    if not hit:
+        return None
+    keys = [f"notice:{r['id']}" for r in hit]
+    if len(hit) == 1:
+        r = hit[0]
+        body = " ".join((r["body"] or "").split())
+        if len(body) > NOTICE_PREVIEW:
+            body = body[:NOTICE_PREVIEW].rstrip() + "…"
+        return f"{r['course']} 공지 — {r['title']}", body or "본문 없음", _url(notice=r["id"]), keys
+    return (f"새 공지 {len(hit)}개",
+            "\n".join(f"· {r['course']} — {r['title']}" for r in hit[:6]),
+            _url(notice=hit[-1]["id"]), keys)
+
+
 # ---------------------------------------------------------------- 실행
 def _sent(conn, key: str) -> bool:
     return conn.execute("SELECT 1 FROM push_log WHERE key=?", [key]).fetchone() is not None
@@ -267,6 +295,9 @@ def run(now: datetime | None = None, dry: bool = False) -> list[dict]:
         lo = lec_opened(live, now, lambda k: _sent(conn, k))
         if lo:
             todo.append((lo[3], lo[0], lo[1], lo[2], "high"))
+        nt = notices_new(conn, now, lambda k: _sent(conn, k))
+        if nt:
+            todo.append((nt[3], nt[0], nt[1], nt[2], "normal"))
         out = []
         for keys, title, body, url, urg in todo:
             n = 0

@@ -378,3 +378,99 @@ def est_history(conn: sqlite3.Connection, course: str | None = None,
     return [{"target": r["target"], "label": r["label"], "course": r["course"], "kind": r["kind"],
              "old_hours": r["old_hours"], "new_hours": r["new_hours"], "actual": bool(r["actual"]),
              "reason": r["reason"], "at": r["at"]} for r in conn.execute(sql, args)]
+
+
+# ── Canvas 공지 (2026-09-26) ────────────────────────────────────────────────
+# 폴러(poller/canvas_poll.py)가 30분마다 notice 에 채운다. 여기선 읽고, 대시보드에서 펼친 것만 적는다.
+CAP_NOTICES = 15
+NOTICE_CHAT_MAX = 1500          # 챗으로 넘길 때 한 건 본문 상한. 대시보드는 통째로 준다
+
+
+def notices(conn: sqlite3.Connection, days: int = 21, course: str | None = None,
+            unread_only: bool = False, limit: int = CAP_NOTICES,
+            body_max: int | None = NOTICE_CHAT_MAX) -> list[dict]:
+    """최근순. unread = Canvas 가 안 읽음이라 하고 대시보드에서도 안 펼친 것."""
+    lo = (datetime.now(KST) - timedelta(days=days)).isoformat(timespec="seconds")
+    sql = "SELECT * FROM notice WHERE posted_at >= ?"
+    args: list = [lo]
+    if course:
+        sql += " AND course LIKE ?"
+        args.append(f"%{course}%")
+    if unread_only:
+        sql += " AND canvas_read = 0 AND read_at IS NULL"
+    sql += " ORDER BY posted_at DESC LIMIT ?"
+    args.append(limit)
+    out = []
+    for r in conn.execute(sql, args):
+        body = r["body"] or ""
+        cut = body_max is not None and len(body) > body_max
+        out.append({"id": r["id"], "course": r["course"], "title": r["title"],
+                    "posted_at": r["posted_at"], "url": r["url"],
+                    "body": body[:body_max] + " …(잘림)" if cut else body,
+                    "files": r["files"].split("\n") if r["files"] else [],
+                    "unread": not r["canvas_read"] and not r["read_at"]})
+    return out
+
+
+def notice_read(conn: sqlite3.Connection, ids: list[str] | None) -> int:
+    """대시보드에서 펼친 공지. ids=None 이면 안 읽은 것 전부. Canvas 엔 안 알린다(읽기 전용)."""
+    ts = _now_iso()
+    if ids is None:
+        n = conn.execute("UPDATE notice SET read_at=? WHERE read_at IS NULL", [ts]).rowcount
+    else:
+        n = sum(conn.execute("UPDATE notice SET read_at=? WHERE id=? AND read_at IS NULL", [ts, i]).rowcount
+                for i in ids[:200])
+    conn.commit()
+    return n
+
+
+# ── 연결 상태 (2026-09-26) ──────────────────────────────────────────────────
+# 폴러는 poller/srcstatus.py 로 적고, 앱 안에서 부르는 소스(LearningX)는 source_mark 로 적는다.
+# (이름, 표시, 이 시간 넘게 성공이 없으면 '오래됨'. None = 부를 때만 가는 소스라 나이를 안 본다)
+SOURCES = (
+    ("canvas", "Canvas 과제", 2.0),
+    ("notice", "Canvas 공지", 2.0),
+    ("gcal", "구글 캘린더", 1.5),
+    ("learningx", "강의영상 (LearningX)", None),
+)
+
+
+def source_mark(conn: sqlite3.Connection, source: str, err: str | None = None,
+                note: str | None = None) -> None:
+    ts = _now_iso()
+    if err is None:
+        conn.execute("INSERT INTO source_status (source,last_try,last_ok,err,note) VALUES (?,?,?,NULL,?) "
+                     "ON CONFLICT(source) DO UPDATE SET last_try=excluded.last_try,last_ok=excluded.last_ok,"
+                     "err=NULL,note=excluded.note", [source, ts, ts, note])
+    else:
+        conn.execute("INSERT INTO source_status (source,last_try,err) VALUES (?,?,?) "
+                     "ON CONFLICT(source) DO UPDATE SET last_try=excluded.last_try,err=excluded.err",
+                     [source, ts, err[:200]])
+    conn.commit()
+
+
+def sources(conn: sqlite3.Connection) -> list[dict]:
+    """state: ok | stale(성공이 너무 오래 전) | err(마지막 시도 실패) | never(기록 없음)."""
+    now = datetime.now(KST)
+    have = {r["source"]: dict(r) for r in conn.execute("SELECT * FROM source_status")}
+    out = []
+    for key, name, max_h in SOURCES:
+        r = have.get(key) or {}
+        ok = r.get("last_ok")
+        if not r:
+            state = "never"
+        elif r.get("err"):
+            state = "err"
+        elif max_h and (not ok or (now - datetime.fromisoformat(ok)).total_seconds() > max_h * 3600):
+            state = "stale"
+        else:
+            state = "ok"
+        out.append({"source": key, "name": name, "state": state, "last_ok": ok,
+                    "last_try": r.get("last_try"), "err": r.get("err"), "note": r.get("note")})
+    # 알림 전달 — 폴러가 아니라 기기 구독이다. 받을 기기가 없으면 알림은 조용히 안 나간다.
+    subs = conn.execute("SELECT COUNT(*) n, MAX(last_ok) ok FROM push_sub").fetchone()
+    out.append({"source": "push", "name": "알림 전달", "state": "ok" if subs["n"] else "err",
+                "last_ok": subs["ok"], "last_try": None,
+                "err": None if subs["n"] else "알림을 받을 기기가 없다",
+                "note": f"기기 {subs['n']}대" if subs["n"] else None})
+    return out

@@ -172,3 +172,32 @@ CREATE TABLE IF NOT EXISTS focus_log (
   ms          INTEGER NOT NULL,
   PRIMARY KEY (id, day)
 );
+
+-- Canvas 공지 (2026-09-26). poller/canvas_poll.py 가 마감과 같은 회차에 채운다 (묶음 요청 1번).
+-- 공지에만 있는 정보가 있다 — 휴강→대체영상→마감, 시험장. 마감 DB 도 LearningX 도 그 인과를 모른다.
+-- "안 읽음" = Canvas 가 unread 라 하고(canvas_read=0) 대시보드에서도 안 펼친 것(read_at NULL).
+-- 목록 조회는 Canvas 의 read_state 를 안 바꾼다(09-26 확인). 대시보드에서 펼쳐도 Canvas 엔 안 알린다.
+CREATE TABLE IF NOT EXISTS notice (
+  id          TEXT PRIMARY KEY,   -- canvas:<course_id>:<topic_id>
+  course      TEXT,
+  title       TEXT NOT NULL,
+  body        TEXT,               -- message HTML 벗긴 텍스트
+  posted_at   TEXT NOT NULL,      -- ISO8601 +09:00
+  url         TEXT,               -- Canvas html_url
+  files       TEXT,               -- 첨부 파일 이름, 줄바꿈으로
+  canvas_read INTEGER,            -- Canvas read_state: 1 read / 0 unread
+  read_at     TEXT,               -- 대시보드에서 펼친 시각
+  first_seen  TEXT NOT NULL,      -- 폴러가 처음 본 시각
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notice_posted ON notice(posted_at);
+
+-- 연결 상태 (2026-09-26). 소스마다 마지막 시도·성공. 토큰이 죽어도 대시보드가 조용히 옛 데이터를
+-- 보여주던 문제 — 폴러·조회가 끝날 때마다 한 줄 갱신하고, 대시보드 톱니의 "연결 상태" 가 읽는다.
+CREATE TABLE IF NOT EXISTS source_status (
+  source      TEXT PRIMARY KEY,   -- canvas | notice | gcal | learningx
+  last_try    TEXT NOT NULL,
+  last_ok     TEXT,
+  err         TEXT,               -- 마지막 시도가 실패했으면 그 이유. 성공하면 NULL
+  note        TEXT                -- 마지막 성공의 한 줄 (예: "19건")
+);

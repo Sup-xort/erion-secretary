@@ -7,7 +7,9 @@
   활성 과목 목록 → 과목마다 assignments(+submission) → due_at 이 창 안이면 upsert.
   창 안인데 이번 회차에 안 보인 canvas:* 행은 지운다 (Canvas 에서 삭제된 과제).
 
-쓰는 것은 `deadline` 뿐이다. 다른 테이블은 건드리지 않는다.
+  (2026-09-26) 같은 회차에 공지도 받는다 — 묶음 요청 1번으로 전 과목. `notice` 에 upsert.
+
+쓰는 것은 `deadline` · `notice` · `source_status`(연결 상태 한 줄씩) 뿐이다.
 """
 
 import argparse
@@ -21,6 +23,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from srcstatus import SCHEMA, mark as _status
 
 KST = timezone(timedelta(hours=9))
 BASE = os.environ.get("ERION_CANVAS_BASE", "https://canvas.skku.edu") + "/api/v1"
@@ -123,11 +127,10 @@ def _courses(tok: str) -> list[dict]:
     return _get("/courses?enrollment_state=active&per_page=100", tok)
 
 
-def collect(tok: str) -> list[dict]:
+def collect(tok: str, courses: list[dict]) -> list[dict]:
     now = datetime.now(KST)
     lo, hi = now - timedelta(days=PAST_DAYS), now + timedelta(days=FUTURE_DAYS)
     rows = []
-    courses = _courses(tok)
     for c in courses:
         cid = c.get("id")
         if cid in EXCLUDE_COURSES:
@@ -205,13 +208,101 @@ def write(rows: list[dict], prune: bool) -> tuple[int, int, int]:
         conn.close()
 
 
+# ---------------------------------------------------------------- 공지
+# 묶음 엔드포인트는 **기본 범위가 최근 2주다** — 날짜를 안 주면 옛 공지가 빠진다 (verified.md).
+NOTICE_DAYS = 120
+NOTICE_MAX = 6000
+
+
+def _flat_tables(h: str) -> str:
+    """표를 한 행 한 줄("셀 | 셀")로. 안 하면 _plain 이 셀마다 줄을 바꿔 고사장 안내 같은 공지가
+    낱말 세로줄이 된다. 칸 맞춤(rowspan)은 버린다 — 읽을 수만 있으면 된다."""
+    def row(m):
+        cells = re.findall(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", m.group(0))
+        txt = [" ".join(html.unescape(re.sub(r"<[^>]+>", " ", c)).split()) for c in cells]
+        return "<p>" + " | ".join(t for t in txt if t) + "</p>"
+    return re.sub(r"(?is)<tr\b.*?</tr>", row, h)
+
+
+def collect_notices(tok: str, courses: list[dict]) -> list[dict]:
+    names = {c["id"]: (c.get("name") or "").split("_")[0].strip() or c.get("name") or ""
+             for c in courses if c.get("id") not in EXCLUDE_COURSES}
+    if not names:
+        return []
+    now = datetime.now(timezone.utc)
+    q = "&".join(f"context_codes[]=course_{cid}" for cid in names)
+    q += (f"&start_date={(now - timedelta(days=NOTICE_DAYS)).date().isoformat()}"
+          f"&end_date={(now + timedelta(days=1)).date().isoformat()}&per_page=100")
+    rows = []
+    for a in _get(f"/announcements?{q}", tok):
+        cid = int((a.get("context_code") or "course_0").split("_")[-1])
+        posted = _to_kst(a.get("posted_at") or a.get("created_at"))
+        if not posted:
+            continue
+        body = _plain(_flat_tables(a.get("message") or ""))
+        rows.append({
+            "id": f"canvas:{cid}:{a['id']}",
+            "course": names.get(cid) or str(cid),
+            "title": (a.get("title") or "").strip() or "(제목 없음)",
+            "body": body[:NOTICE_MAX] if body else None,
+            "posted_at": posted,
+            "url": a.get("html_url"),
+            "files": "\n".join(f.get("display_name") or f.get("filename") or ""
+                               for f in a.get("attachments") or []) or None,
+            "canvas_read": 0 if a.get("read_state") == "unread" else 1,
+        })
+    return rows
+
+
+def write_notices(rows: list[dict]) -> tuple[int, int, int]:
+    now = datetime.now(KST)
+    ts = now.isoformat(timespec="seconds")
+    conn = sqlite3.connect(VAULT_DB)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(SCHEMA)
+        before = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM notice")}
+        ins = upd = 0
+        for r in rows:
+            old = before.get(r["id"])
+            if old is None:
+                ins += 1
+            elif any(old[k] != r[k] for k in ("title", "body", "posted_at", "url", "files", "canvas_read")):
+                upd += 1
+            conn.execute(
+                "INSERT INTO notice (id,course,title,body,posted_at,url,files,canvas_read,first_seen,updated_at) "
+                "VALUES (:id,:course,:title,:body,:posted_at,:url,:files,:canvas_read,:ts,:ts) "
+                "ON CONFLICT(id) DO UPDATE SET course=:course,title=:title,body=:body,posted_at=:posted_at,"
+                "url=:url,files=:files,canvas_read=:canvas_read,updated_at=:ts",
+                # read_at(대시보드에서 펼침)·first_seen 은 덮지 않는다
+                {**r, "ts": ts})
+        # 교수가 지운 공지. 창 안의 것만 — 창 밖으로 밀려난 옛 공지는 남겨둔다.
+        lo = (now - timedelta(days=NOTICE_DAYS - 1)).isoformat(timespec="seconds")
+        seen = {r["id"] for r in rows}
+        gone = [r["id"] for r in conn.execute("SELECT id FROM notice WHERE posted_at >= ?", [lo])
+                if r["id"] not in seen]
+        conn.executemany("DELETE FROM notice WHERE id=?", [[i] for i in gone])
+        conn.commit()
+        return ins, upd, len(gone)
+    finally:
+        conn.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Canvas → 볼트 deadline 폴러")
     ap.add_argument("--dry", action="store_true", help="DB 에 안 쓰고 무엇이 바뀔지만 보여준다")
     ap.add_argument("--no-prune", action="store_true", help="사라진 과제를 지우지 않는다")
     args = ap.parse_args()
 
-    rows = collect(_token())
+    try:
+        tok = _token()
+        courses = _courses(tok)
+        rows = collect(tok, courses)
+    except (Exception, SystemExit) as e:
+        if not args.dry:
+            _status("canvas", e)
+            _status("notice", e)
+        raise
     rows.sort(key=lambda r: r["due_at"])
     pend = [r for r in rows if not r["submitted"]]
     print(f"[canvas] 수집 {len(rows)}건 (미제출 {len(pend)}건)")
@@ -227,6 +318,20 @@ def main() -> int:
         return 0
     ins, upd, gone = write(rows, prune=not args.no_prune)
     print(f"[canvas] 신규 {ins} · 갱신 {upd} · 삭제 {gone}")
+    _status("canvas", note=f"{len(rows)}건 · 미제출 {len(pend)}")
+
+    # 공지는 따로 실패한다 — 마감은 이미 적었고, 뒤의 추정 배치(ExecStartPost)를 막지 않게 0 으로 끝낸다.
+    # 실패는 연결 상태 면에 남는다.
+    try:
+        ns = collect_notices(tok, courses)
+        n_ins, n_upd, n_gone = write_notices(ns)
+    except (Exception, SystemExit) as e:
+        print(f"[notice] 실패: {e}", file=sys.stderr)
+        _status("notice", e)
+        return 0
+    unread = sum(1 for n in ns if not n["canvas_read"])
+    print(f"[notice] {len(ns)}건 (Canvas 안 읽음 {unread}) · 신규 {n_ins} · 갱신 {n_upd} · 삭제 {n_gone}")
+    _status("notice", note=f"{len(ns)}건 · 안 읽음 {unread}")
     return 0
 
 
