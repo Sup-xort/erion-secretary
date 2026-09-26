@@ -1,0 +1,15 @@
+[Unit]
+Description=erion vault (remote MCP + OAuth)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/projects/erion
+EnvironmentFile=/home/ubuntu/projects/erion/.env
+ExecStart=/home/ubuntu/projects/erion/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

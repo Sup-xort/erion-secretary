@@ -1,0 +1,14 @@
+[Unit]
+Description=erion gcal poller (Google Calendar -> vault block)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/projects/erion
+EnvironmentFile=/home/ubuntu/projects/erion/.env
+ExecStart=/home/ubuntu/projects/erion/.venv/bin/python poller/gcal_poll.py
+# 싼 층이다. 무거워지면 그건 설계가 틀린 것이다 (decisions.md).
+MemoryMax=200M
+TimeoutStartSec=300

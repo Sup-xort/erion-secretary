@@ -1,0 +1,17 @@
+[Unit]
+Description=erion canvas poller (Canvas -> vault deadline)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/projects/erion
+EnvironmentFile=/home/ubuntu/projects/erion/.env
+ExecStart=/home/ubuntu/projects/erion/.venv/bin/python poller/canvas_poll.py
+# 새 과제의 소요시간·표시 이름 추정 (estimate.py). 앞의 "-" = 실패해도 폴러는 성공으로 친다 —
+# 모델 API 가 죽었다고 마감 수집까지 실패로 보이면 안 된다. 밀린 건 다음 회차가 잇는다.
+ExecStartPost=-/home/ubuntu/projects/erion/.venv/bin/python poller/estimate.py
+# 싼 층이다. 무거워지면 그건 설계가 틀린 것이다 (decisions.md).
+MemoryMax=200M
+TimeoutStartSec=600

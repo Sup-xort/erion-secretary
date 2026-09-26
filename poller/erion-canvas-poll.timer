@@ -1,0 +1,14 @@
+[Unit]
+Description=erion canvas poller 주기 실행
+
+[Timer]
+# 30분마다. 과제 목록은 자주 안 바뀌지만 제출 여부는 바뀐다.
+OnBootSec=3min
+OnUnitActiveSec=30min
+# 여러 타이머가 정각에 몰리지 않게 흩는다.
+RandomizedDelaySec=90
+# 서버가 꺼져 있었으면 켜질 때 한 번 따라잡는다.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+# erion 볼트 의존성. canvas/decide 와 달리 여기는 stdlib-only가 아니다 —
+# 원격 MCP 서버라 SDK가 필수다. 버전은 2026-08-21 서버 venv에 실제로 깔린 것으로 고정.
+mcp==2.0.0
+starlette==1.6.0
+uvicorn==0.52.4
+# authlib 는 쓰지 않는다. MCP SDK 가 OAuth 엔드포인트·PKCE·Bearer 검증을 전부 처리한다.

@@ -1,0 +1,15 @@
+[Unit]
+Description=erion notify (plan/deadlines -> web push)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/projects/erion
+EnvironmentFile=/home/ubuntu/projects/erion/.env
+# 판단은 app/notify.py, 보내기는 app/push.py. 받을 기기가 없으면 바로 끝난다.
+ExecStart=/home/ubuntu/projects/erion/.venv/bin/python -m app.notify
+# 싼 층이다. 무거워지면 그건 설계가 틀린 것이다 (decisions.md).
+MemoryMax=200M
+TimeoutStartSec=180

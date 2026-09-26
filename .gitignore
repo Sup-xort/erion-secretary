@@ -1,0 +1,16 @@
+# 비밀값 — 절대 커밋 금지
+.env
+.env.*
+data/
+
+# 런타임
+.venv/
+__pycache__/
+*.pyc
+
+# 손으로 뜬 백업 (이제 git 이 대신한다)
+*.bak-*
+*.bak
+
+# 문서·DB 는 private 저장소 vault-for-erion 이 따로 관리한다 (memory/ 가 그 clone)
+memory/

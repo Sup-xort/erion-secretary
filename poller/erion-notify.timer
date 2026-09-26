@@ -1,0 +1,12 @@
+[Unit]
+Description=erion notify 주기 실행
+
+[Timer]
+# 10분마다, 시계에 맞춰서 — 아침 9시 알림이 9:00~9:10 사이에 나가게.
+OnCalendar=*:0/10
+AccuracySec=30s
+# 꺼져 있던 동안 밀린 회차는 따라잡지 않는다. 지난 알림은 의미가 없다.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
